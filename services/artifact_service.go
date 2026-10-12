@@ -47,12 +47,17 @@ type ArtifactService interface {
 	GetArtifactChangelogFiles(gitCommitID uint64, options *models.ArtifactChangelogFilesOptions) (*models.ArtifactChangelogFilesInfo, error)
 	GetArtifactTagSchema(version string) (*models.ArtifactTagSchemaInfo, error)
 	GetArtifactTagSchemaJSON(version string) (map[string]any, error)
+	GetArtifactLabelMode(version string) (string, error)
+	UsesFlatLabels(version string) (bool, error)
 	GetJfrogToken(projectName string) (*models.JfrogTokenInfo, error)
 	GetJfrogTokenByArtifactName(name string, lookup *models.ArtifactLookupOptions) (*models.JfrogTokenInfo, error)
 	GetArtifactDownloadURL(artifactID uint64, downloadType string) (*models.ArtifactDownloadURLInfo, error)
 	GetArtifactDownloadURLByName(name string, lookup *models.ArtifactLookupOptions, downloadType string) (*models.ArtifactDownloadURLInfo, error)
 	GetParsedArtifactTags(artifactID uint64) (map[string]any, error)
 	UpdateArtifactTags(artifactID uint64, tags map[string]any, tagSchemaVersion string) (*models.BaseMsgResp, error)
+	PatchArtifactTags(artifactID uint64, tagsPatch map[string]any, tagSchemaVersion string) (*models.BaseMsgResp, error)
+	PatchArtifactLabels(artifactID uint64, labels map[string]any, tagSchemaVersion string) (*models.BaseMsgResp, error)
+	ListArtifactsByLabels(labels map[string]any, tagSchemaVersion string, page, pageSize uint64) (*models.ArtifactListResp, error)
 	ParseArtifactTags(tags string, schema any) (map[string]any, error)
 }
 
@@ -460,6 +465,31 @@ func (s *artifactService) GetArtifactTagSchemaJSON(version string) (map[string]a
 	return models.ParseJSON(schema.Content)
 }
 
+// GetArtifactLabelMode returns the label grammar declared by the artifact tag
+// schema document: models.LabelModeFlat for artifact-tag 0.3.0 and later flat
+// label schemas, models.LabelModeLegacy for the original nested grammar.
+func (s *artifactService) GetArtifactLabelMode(version string) (string, error) {
+	schema, err := s.GetArtifactTagSchema(version)
+	if err != nil {
+		return "", err
+	}
+	mode, err := schema.LabelMode()
+	if err != nil {
+		return "", utils.NewAPIError("failed to decode artifact tag schema", err)
+	}
+	return mode, nil
+}
+
+// UsesFlatLabels reports whether the artifact tag schema uses the flat label
+// grammar.
+func (s *artifactService) UsesFlatLabels(version string) (bool, error) {
+	mode, err := s.GetArtifactLabelMode(version)
+	if err != nil {
+		return false, err
+	}
+	return mode == models.LabelModeFlat, nil
+}
+
 func (s *artifactService) GetJfrogToken(projectName string) (*models.JfrogTokenInfo, error) {
 	var response struct {
 		Code int                   `json:"code"`
@@ -566,6 +596,104 @@ func (s *artifactService) UpdateArtifactTags(artifactID uint64, tags map[string]
 	})
 }
 
+// PatchArtifactTags patches artifact tags with JSON Merge Patch semantics
+// through the existing patch-tags endpoint.
+func (s *artifactService) PatchArtifactTags(artifactID uint64, tagsPatch map[string]any, tagSchemaVersion string) (*models.BaseMsgResp, error) {
+	if tagsPatch == nil {
+		return nil, utils.NewAPIError("tagsPatch must not be nil", nil)
+	}
+	var response struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	req := &models.ArtifactTagPatchReq{
+		ArtifactID:       artifactID,
+		TagsPatch:        mustJSON(tagsPatch),
+		TagSchemaVersion: tagSchemaVersion,
+	}
+	if err := s.httpClient.Post("/aiplorer/artifact/patch-tags", req, &response); err != nil {
+		return nil, utils.NewAPIError("failed to patch artifact tags", err)
+	}
+	if response.Code != 0 {
+		return nil, utils.NewAPIError(response.Msg, nil)
+	}
+	return &models.BaseMsgResp{Msg: response.Msg}, nil
+}
+
+// PatchArtifactLabels patches flat artifact labels for schemas that declare
+// label_mode "flat" (artifact-tag 0.3.0 and later). The schema version is
+// resolved from the artifact when not given explicitly.
+//
+// Every submitted key follows JSON Merge Patch semantics: new values overwrite
+// the current ones and nil deletes custom.* keys. The backend rejects nil for
+// eval.* and gate.* keys, and requires a matching urls key in the same request
+// whenever an eval.* value key is submitted.
+func (s *artifactService) PatchArtifactLabels(artifactID uint64, labels map[string]any, tagSchemaVersion string) (*models.BaseMsgResp, error) {
+	if len(labels) == 0 {
+		return nil, utils.NewAPIError("labels must not be empty", nil)
+	}
+	version := tagSchemaVersion
+	if version == "" {
+		artifact, err := s.GetArtifactByID(artifactID)
+		if err != nil {
+			return nil, err
+		}
+		if artifact.TagSchemaVersion != nil {
+			version = *artifact.TagSchemaVersion
+		}
+	}
+	if version == "" {
+		return nil, utils.NewAPIError("tagSchemaVersion is required to patch artifact labels", nil)
+	}
+
+	flat, err := s.UsesFlatLabels(version)
+	if err != nil {
+		return nil, err
+	}
+	if !flat {
+		return nil, utils.NewAPIError(fmt.Sprintf(
+			"artifact tag schema %s does not declare label_mode %q; use UpdateArtifactTags for legacy schemas",
+			version, models.LabelModeFlat,
+		), nil)
+	}
+
+	return s.PatchArtifactTags(artifactID, map[string]any{
+		"schema_version": version,
+		"labels":         labels,
+	}, version)
+}
+
+// ListArtifactsByLabels lists artifacts matching flat artifact labels. The
+// backend requires tagSchemaVersion whenever a tag filter is present and
+// evaluates every provided label with AND semantics.
+func (s *artifactService) ListArtifactsByLabels(labels map[string]any, tagSchemaVersion string, page, pageSize uint64) (*models.ArtifactListResp, error) {
+	if tagSchemaVersion == "" {
+		return nil, utils.NewAPIError("tagSchemaVersion is required to search artifacts by labels", nil)
+	}
+	if len(labels) == 0 {
+		return nil, utils.NewAPIError("labels must not be empty", nil)
+	}
+
+	flat, err := s.UsesFlatLabels(tagSchemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	if !flat {
+		return nil, utils.NewAPIError(fmt.Sprintf(
+			"artifact tag schema %s does not declare label_mode %q; use a nested tag filter for legacy schemas",
+			tagSchemaVersion, models.LabelModeFlat,
+		), nil)
+	}
+
+	tagFilter := mustJSON(map[string]any{"labels": labels})
+	return s.ListArtifacts(&models.ArtifactListReq{
+		Page:             page,
+		PageSize:         pageSize,
+		TagSchemaVersion: stringPtr(tagSchemaVersion),
+		TagFilter:        &tagFilter,
+	})
+}
+
 func (s *artifactService) ParseArtifactTags(tags string, schema any) (map[string]any, error) {
 	parsedTags, err := models.ParseJSON(tags)
 	if err != nil {
@@ -589,7 +717,12 @@ func (s *artifactService) ParseArtifactTags(tags string, schema any) (map[string
 	if err != nil {
 		return nil, utils.NewAPIError("failed to decode artifact tag schema", err)
 	}
-	schemaVersion, hasSchemaVersion := parsedSchema["version"].(string)
+	// Schema documents carry "schema_version"; "version" is kept as a fallback
+	// for older or third-party schema payloads.
+	schemaVersion, hasSchemaVersion := parsedSchema["schema_version"].(string)
+	if !hasSchemaVersion {
+		schemaVersion, hasSchemaVersion = parsedSchema["version"].(string)
+	}
 	tagSchemaVersion, hasTagSchemaVersion := parsedTags["schema_version"].(string)
 	if hasSchemaVersion && hasTagSchemaVersion && schemaVersion != tagSchemaVersion {
 		return nil, utils.NewAPIError("artifact tag schema version does not match tag schema_version", nil)
