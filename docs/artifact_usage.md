@@ -23,8 +23,13 @@
 - `sdk.Artifact.GetArtifactChangelog`
 - `sdk.Artifact.GetArtifactChangelogFiles`
 - `sdk.Artifact.GetArtifactTagSchema`
+- `sdk.Artifact.GetArtifactLabelMode`
+- `sdk.Artifact.UsesFlatLabels`
 - `sdk.Artifact.ParseArtifactTags`
 - `sdk.Artifact.GetParsedArtifactTags`
+- `sdk.Artifact.PatchArtifactTags`
+- `sdk.Artifact.PatchArtifactLabels`
+- `sdk.Artifact.ListArtifactsByLabels`
 - `sdk.Artifact.GetJfrogToken`
 - `sdk.Artifact.GetArtifactDownloadURL`
 - `sdk.Artifact.GetArtifactDownloadURLByName`
@@ -323,6 +328,79 @@ if err != nil {
 	return err
 }
 ```
+
+### 扁平标签（0.3.0 起）
+
+制品标签 0.3.0 起引入了扁平标签文法，schema 文档中通过
+`"label_mode": "flat"` 声明，载荷固定为 `{schema_version, labels}`：
+
+```json
+{
+  "schema_version": "0.3.0",
+  "labels": {
+    "eval.L1.sim.pass_rate.ratio": "0.9-1.0",
+    "eval.L1.sim.urls": ["https://example.com/report"],
+    "gate.L2": "PASS"
+  }
+}
+```
+
+先判断当前 schema 属于哪套文法。未声明 `label_mode` 的历史 schema
+（0.1.0 / 0.2.0）按 `models.LabelModeLegacy` 处理：
+
+```go
+mode, err := sdk.Artifact.GetArtifactLabelMode("0.3.0") // models.LabelModeFlat
+if err != nil {
+	return err
+}
+
+flat, err := sdk.Artifact.UsesFlatLabels("0.3.0")
+if err != nil {
+	return err
+}
+```
+
+写入扁平标签用 `PatchArtifactLabels`。它走 `patch-tags`，自动补上
+`schema_version`，并在 schema 不是扁平文法时直接报错，避免把扁平键
+误写进 legacy 制品：
+
+```go
+_, err = sdk.Artifact.PatchArtifactLabels(
+	artifactID,
+	map[string]any{
+		"eval.L1.sim.pass_rate.ratio": "0.9-1.0",
+		"eval.L1.sim.urls":            []any{"https://example.com/report"},
+	},
+	"0.3.0",
+)
+```
+
+约束由服务端整体校验：`eval.*` / `gate.*` 不能用 `nil` 删除，
+`custom.*` 可以；提交 `eval.*` 值键时同一请求必须带上对应的
+`eval.{loop}.{module}.urls`。
+
+按标签检索制品用 `ListArtifactsByLabels`，底层走 `artifact/list`
+的 `tagFilter`，多个条件之间是 AND：
+
+```go
+result, err := sdk.Artifact.ListArtifactsByLabels(
+	map[string]any{
+		"gate.L2":                     "PASS",
+		"eval.L1.sim.pass_rate.ratio": "0.9-1.0",
+	},
+	"0.3.0",
+	1,
+	20,
+)
+```
+
+它同样会先确认目标 schema 是扁平文法，避免用扁平键查 legacy 制品
+时静默返回空结果。需要做更自由的组合过滤时，可以直接给
+`models.ArtifactListReq` 设置 `TagFilter` / `TagSchemaVersion`。
+
+`PatchArtifactTags` 是底层入口，直接用 JSON Merge Patch 语义提交
+`tagsPatch`；`PatchArtifactLabels` 和 `ListArtifactsByLabels` 都是
+在此基础上针对扁平标签的语义封装。
 
 ## JFrog token 与下载地址
 

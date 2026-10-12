@@ -604,3 +604,220 @@ func TestGetArtifactCommitDiffCompareMode(t *testing.T) {
 		}
 	})
 }
+
+const flatTagSchemaContent = `{"schema_version":"0.3.0","label_mode":"flat","vocab":{"dim":{"pass_rate":"ratio","state":"bool"}},"buckets":{"ratio":["0.8-0.9","0.9-1.0"]},"schema":{}}`
+const legacyTagSchemaContent = `{"schema_version":"0.2.0","schema":{}}`
+
+func tagSchemaHandler(t *testing.T, version, content string, extra func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/aiplorer/artifact/tag-schema":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"version":"` + version + `","content":` + mustJSON(content) + `}}`))
+		case "/aiplorer/artifact":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"id":12,"tagSchemaVersion":"` + version + `","tags":` + mustJSON(content) + `}}`))
+		default:
+			if extra != nil {
+				extra(w, r)
+				return
+			}
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}
+}
+
+func TestGetArtifactLabelModeDetectsFlatAndLegacy(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		version  string
+		content  string
+		wantMode string
+		wantFlat bool
+	}{
+		{"flat schema", "0.3.0", flatTagSchemaContent, models.LabelModeFlat, true},
+		{"legacy schema without label_mode", "0.2.0", legacyTagSchemaContent, models.LabelModeLegacy, false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			service := newArtifactTestService(t, tagSchemaHandler(t, tc.version, tc.content, nil))
+
+			mode, err := service.GetArtifactLabelMode(tc.version)
+			if err != nil {
+				t.Fatalf("GetArtifactLabelMode error: %v", err)
+			}
+			if mode != tc.wantMode {
+				t.Fatalf("label mode = %q, want %q", mode, tc.wantMode)
+			}
+
+			flat, err := service.UsesFlatLabels(tc.version)
+			if err != nil {
+				t.Fatalf("UsesFlatLabels error: %v", err)
+			}
+			if flat != tc.wantFlat {
+				t.Fatalf("UsesFlatLabels = %v, want %v", flat, tc.wantFlat)
+			}
+		})
+	}
+}
+
+func TestParseArtifactTagsChecksSchemaVersionFromDocument(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, tagSchemaHandler(t, "0.3.0", flatTagSchemaContent, nil))
+
+	// The schema document carries "schema_version"; a payload that matches it is
+	// accepted even though the document has no "version" field.
+	if _, err := service.ParseArtifactTags(
+		`{"schema_version":"0.3.0","labels":{"gate.L2":"PASS"}}`,
+		models.ArtifactTagSchemaInfo{Version: "0.3.0", Content: flatTagSchemaContent},
+	); err != nil {
+		t.Fatalf("ParseArtifactTags rejected matching version: %v", err)
+	}
+
+	if _, err := service.ParseArtifactTags(
+		`{"schema_version":"9.9.9","labels":{}}`,
+		models.ArtifactTagSchemaInfo{Version: "0.3.0", Content: flatTagSchemaContent},
+	); err == nil {
+		t.Fatal("ParseArtifactTags accepted a mismatched schema_version")
+	}
+}
+
+func TestPatchArtifactTagsPostsMergePatchPayload(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/aiplorer/artifact/patch-tags" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		payload := decodeBody(t, r)
+		if payload["artifactId"].(float64) != 12 {
+			t.Fatalf("unexpected artifactId: %#v", payload)
+		}
+		if payload["tagSchemaVersion"].(string) != "0.3.0" {
+			t.Fatalf("unexpected tagSchemaVersion: %#v", payload)
+		}
+		var patch map[string]any
+		if err := json.Unmarshal([]byte(payload["tagsPatch"].(string)), &patch); err != nil {
+			t.Fatalf("tagsPatch is not JSON: %v", err)
+		}
+		if patch["gate.L2"] != "PASS" {
+			t.Fatalf("unexpected tagsPatch: %#v", patch)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"update success"}`))
+	})
+
+	resp, err := service.PatchArtifactTags(12, map[string]any{"gate.L2": "PASS"}, "0.3.0")
+	if err != nil {
+		t.Fatalf("PatchArtifactTags error: %v", err)
+	}
+	if resp.Msg != "update success" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
+func TestPatchArtifactLabelsWrapsLabelsIntoSchemaPayload(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, tagSchemaHandler(t, "0.3.0", flatTagSchemaContent, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/aiplorer/artifact/patch-tags" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		payload := decodeBody(t, r)
+		var patch map[string]any
+		if err := json.Unmarshal([]byte(payload["tagsPatch"].(string)), &patch); err != nil {
+			t.Fatalf("tagsPatch is not JSON: %v", err)
+		}
+		if patch["schema_version"] != "0.3.0" {
+			t.Fatalf("schema_version not injected: %#v", patch)
+		}
+		labels, ok := patch["labels"].(map[string]any)
+		if !ok || labels["gate.L2"] != "PASS" {
+			t.Fatalf("unexpected labels: %#v", patch)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"update success"}`))
+	}))
+
+	if _, err := service.PatchArtifactLabels(12, map[string]any{"gate.L2": "PASS"}, "0.3.0"); err != nil {
+		t.Fatalf("PatchArtifactLabels error: %v", err)
+	}
+}
+
+func TestPatchArtifactLabelsRejectsLegacySchema(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, tagSchemaHandler(t, "0.2.0", legacyTagSchemaContent, nil))
+
+	_, err := service.PatchArtifactLabels(12, map[string]any{"gate.L2": "PASS"}, "0.2.0")
+	if err == nil || !strings.Contains(err.Error(), "does not declare label_mode") {
+		t.Fatalf("expected legacy schema rejection, got %v", err)
+	}
+}
+
+func TestPatchArtifactLabelsRequiresLabels(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("no request expected, got %s", r.URL.Path)
+	})
+
+	if _, err := service.PatchArtifactLabels(12, map[string]any{}, "0.3.0"); err == nil {
+		t.Fatal("expected empty labels to be rejected")
+	}
+}
+
+func TestListArtifactsByLabelsPostsTagFilter(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, tagSchemaHandler(t, "0.3.0", flatTagSchemaContent, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/aiplorer/artifact/list" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		payload := decodeBody(t, r)
+		if payload["tagSchemaVersion"].(string) != "0.3.0" {
+			t.Fatalf("unexpected tagSchemaVersion: %#v", payload)
+		}
+		if payload["page"].(float64) != 2 || payload["pageSize"].(float64) != 50 {
+			t.Fatalf("unexpected pagination: %#v", payload)
+		}
+		var tagFilter map[string]any
+		if err := json.Unmarshal([]byte(payload["tagFilter"].(string)), &tagFilter); err != nil {
+			t.Fatalf("tagFilter is not JSON: %v", err)
+		}
+		labels, ok := tagFilter["labels"].(map[string]any)
+		if !ok || labels["gate.L2"] != "PASS" {
+			t.Fatalf("unexpected tagFilter: %#v", tagFilter)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"total":1,"data":[{"id":12,"name":"artifact-a"}]}}`))
+	}))
+
+	result, err := service.ListArtifactsByLabels(map[string]any{"gate.L2": "PASS"}, "0.3.0", 2, 50)
+	if err != nil {
+		t.Fatalf("ListArtifactsByLabels error: %v", err)
+	}
+	if result.Total != 1 || len(result.Data) != 1 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestListArtifactsByLabelsRejectsLegacySchema(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, tagSchemaHandler(t, "0.2.0", legacyTagSchemaContent, nil))
+
+	_, err := service.ListArtifactsByLabels(map[string]any{"gate.L2": "PASS"}, "0.2.0", 1, 20)
+	if err == nil || !strings.Contains(err.Error(), "does not declare label_mode") {
+		t.Fatalf("expected legacy schema rejection, got %v", err)
+	}
+}
+
+func TestListArtifactsByLabelsValidatesArguments(t *testing.T) {
+	t.Parallel()
+	service := newArtifactTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("no request expected, got %s", r.URL.Path)
+	})
+
+	if _, err := service.ListArtifactsByLabels(map[string]any{"gate.L2": "PASS"}, "", 1, 20); err == nil {
+		t.Fatal("expected missing tagSchemaVersion to be rejected")
+	}
+	if _, err := service.ListArtifactsByLabels(map[string]any{}, "0.3.0", 1, 20); err == nil {
+		t.Fatal("expected empty labels to be rejected")
+	}
+}

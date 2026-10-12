@@ -3,6 +3,17 @@ package models
 
 import "encoding/json"
 
+// Label grammar modes declared by an artifact tag schema document.
+//
+// LabelModeFlat is the artifact-tag 0.3.0 grammar, whose payload is
+// {"schema_version": ..., "labels": {...}} with dotted label keys.
+// LabelModeLegacy is the original nested schema DSL used by 0.1.0/0.2.0;
+// documents without a label_mode field keep using it.
+const (
+	LabelModeFlat   = "flat"
+	LabelModeLegacy = "legacy"
+)
+
 // CommitInfo describes a git commit associated with an artifact.
 type CommitInfo struct {
 	ID             *uint64 `json:"id,omitempty"`
@@ -82,11 +93,14 @@ type ArtifactListReq struct {
 	SemanticVersion  *string `json:"semanticVersion,omitempty"`
 	Tags             *string `json:"tags,omitempty"`
 	TagSchemaVersion *string `json:"tagSchemaVersion,omitempty"`
-	Extra            *string `json:"extra,omitempty"`
-	PipelineID       *string `json:"pipelineId,omitempty"`
-	PipelineURL      *string `json:"pipelineUrl,omitempty"`
-	BuildDate        *int64  `json:"buildDate,omitempty"`
-	ExactCommitHash  *bool   `json:"exactCommitHash,omitempty"`
+	// TagFilter filters by tag content and requires TagSchemaVersion to be set.
+	// For flat label schemas its shape is {"labels": {...}}.
+	TagFilter       *string `json:"tagFilter,omitempty"`
+	Extra           *string `json:"extra,omitempty"`
+	PipelineID      *string `json:"pipelineId,omitempty"`
+	PipelineURL     *string `json:"pipelineUrl,omitempty"`
+	BuildDate       *int64  `json:"buildDate,omitempty"`
+	ExactCommitHash *bool   `json:"exactCommitHash,omitempty"`
 }
 
 // ArtifactListResp is the paged artifact list response body.
@@ -128,6 +142,52 @@ type ArtifactChildHashesInfo struct {
 type ArtifactTagSchemaInfo struct {
 	Version string `json:"version"`
 	Content string `json:"content"`
+}
+
+// Document parses Content into a schema document. It returns an empty map when
+// Content is empty.
+func (s ArtifactTagSchemaInfo) Document() (map[string]any, error) {
+	if s.Content == "" {
+		return map[string]any{}, nil
+	}
+	parsed, err := ParseJSON(s.Content)
+	if err != nil {
+		return nil, err
+	}
+	if parsed == nil {
+		return map[string]any{}, nil
+	}
+	return parsed, nil
+}
+
+// LabelMode returns the label grammar declared by the schema document.
+// Documents without label_mode are treated as legacy.
+func (s ArtifactTagSchemaInfo) LabelMode() (string, error) {
+	document, err := s.Document()
+	if err != nil {
+		return "", err
+	}
+	mode, _ := document["label_mode"].(string)
+	if mode == "" {
+		return LabelModeLegacy, nil
+	}
+	return mode, nil
+}
+
+// UsesFlatLabels reports whether the schema uses the flat label grammar.
+func (s ArtifactTagSchemaInfo) UsesFlatLabels() (bool, error) {
+	mode, err := s.LabelMode()
+	if err != nil {
+		return false, err
+	}
+	return mode == LabelModeFlat, nil
+}
+
+// ArtifactTagPatchReq patches artifact tags with JSON Merge Patch semantics.
+type ArtifactTagPatchReq struct {
+	ArtifactID       uint64 `json:"artifactId"`
+	TagsPatch        string `json:"tagsPatch"`
+	TagSchemaVersion string `json:"tagSchemaVersion,omitempty"`
 }
 
 // JfrogTokenInfo contains a JFrog access token response.
