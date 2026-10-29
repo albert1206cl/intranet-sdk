@@ -80,6 +80,30 @@ if err != nil {
 fmt.Printf("image total: %d\n", images.Total)
 ```
 
+## OCI 镜像差异对比
+
+通过 `sdk.Image.CompareImages` 对比两个 OCI 镜像，获取两镜像对应提交
+之间的 commit 差异。请求参数会编码为 `GET /api/v1/image/diff` 的
+URL query。
+
+`img_fullname_a` 和 `img_fullname_b` 为必填；`page_num` 和
+`page_size` 用于对两镜像之间的 commit 列表分页，可选，设置时必须
+大于 0（SDK 会在本地校验并快速失败）。返回单个 `models.ImageDiffData`
+对象：`commit_a`/`commit_b` 按服务端判定的旧/新角色返回（不保证与
+入参 A/B 顺序对应），`total_commits` 是分页前的 commit 总数，
+`commits` 是当前页的 commit 列表（含新侧 Commit、不含旧侧）。
+
+```go
+diff, err := sdk.Image.CompareImages(&models.ImageDiffReq{
+	ImgFullnameA: "registry.example.com/project/image:v1",
+	ImgFullnameB: "registry.example.com/project/image:v2",
+})
+if err != nil {
+	return err
+}
+fmt.Printf("repo %s: %d commits between images\n", diff.GitRepo, diff.TotalCommits)
+```
+
 ## 错误处理
 
 SDK 返回的主要是 `*utils.SDKError`：
