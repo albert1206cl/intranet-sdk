@@ -14,6 +14,9 @@ import (
 type ImageService interface {
 	// ListImages lists OCI images using optional pagination and filters.
 	ListImages(req *models.ImageListReq) (*models.ImageListResp, error)
+	// CompareImages compares two OCI images and returns the commit difference
+	// between them, with optional pagination over the commits.
+	CompareImages(req *models.ImageDiffReq) (*models.ImageDiffData, error)
 }
 
 type imageService struct {
@@ -84,4 +87,66 @@ func imageListQuery(req *models.ImageListReq) url.Values {
 		query.Set("job_id", strconv.FormatUint(*req.JobID, 10))
 	}
 	return query
+}
+
+// CompareImages implements ImageService.CompareImages.
+func (s *imageService) CompareImages(req *models.ImageDiffReq) (*models.ImageDiffData, error) {
+	if req == nil {
+		return nil, utils.NewInvalidInputError("img_fullname_a and img_fullname_b are required", nil)
+	}
+	if req.ImgFullnameA == "" {
+		return nil, utils.NewInvalidInputError("img_fullname_a is required", nil)
+	}
+	if req.ImgFullnameB == "" {
+		return nil, utils.NewInvalidInputError("img_fullname_b is required", nil)
+	}
+	if err := validatePositiveOptionalUint("page_num", req.PageNum); err != nil {
+		return nil, err
+	}
+	if err := validatePositiveOptionalUint("page_size", req.PageSize); err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Code int                   `json:"code"`
+		Msg  string                `json:"msg"`
+		Data *models.ImageDiffData `json:"data"`
+	}
+
+	utils.Debug("Comparing OCI images %s and %s", req.ImgFullnameA, req.ImgFullnameB)
+	if err := s.httpClient.GetWithQuery("/api/v1/image/diff", imageDiffQuery(req), &response); err != nil {
+		utils.Error("Failed to compare OCI images: %v", err)
+		return nil, utils.NewAPIError("failed to compare images", err)
+	}
+	if response.Code != 0 {
+		utils.Error("API error: %s", response.Msg)
+		return nil, utils.NewAPIError(response.Msg, nil)
+	}
+	if response.Data == nil {
+		response.Data = &models.ImageDiffData{}
+	}
+	if response.Data.Commits == nil {
+		response.Data.Commits = []models.ImageDiffCommitInfo{}
+	}
+	return response.Data, nil
+}
+
+func imageDiffQuery(req *models.ImageDiffReq) url.Values {
+	query := url.Values{}
+	query.Set("img_fullname_a", req.ImgFullnameA)
+	query.Set("img_fullname_b", req.ImgFullnameB)
+	if req.PageNum != nil {
+		query.Set("page_num", strconv.FormatUint(*req.PageNum, 10))
+	}
+	if req.PageSize != nil {
+		query.Set("page_size", strconv.FormatUint(*req.PageSize, 10))
+	}
+	return query
+}
+
+func validatePositiveOptionalUint(name string, value *uint64) error {
+	if value != nil && *value == 0 {
+		return utils.NewInvalidInputError(name+" must be greater than 0 when set", nil)
+	}
+	return nil
 }

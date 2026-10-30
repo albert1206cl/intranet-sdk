@@ -41,3 +41,41 @@ type ImageListResp struct {
 	Total uint64      `json:"total"`
 	Items []ImageInfo `json:"items"`
 }
+
+// ImageDiffReq contains the two image full names to compare. The full names
+// are required; a nil pagination field is omitted from the query string, while
+// a non-nil pointer must be greater than zero as enforced by the server.
+type ImageDiffReq struct {
+	ImgFullnameA string  `json:"img_fullname_a,omitempty"`
+	ImgFullnameB string  `json:"img_fullname_b,omitempty"`
+	PageNum      *uint64 `json:"page_num,omitempty"`
+	PageSize     *uint64 `json:"page_size,omitempty"`
+}
+
+// ImageDiffCommitInfo describes one commit between the two compared images.
+type ImageDiffCommitInfo struct {
+	ID        *uint64 `json:"id,omitempty"`
+	CommitAt  string  `json:"commit_at"`
+	Hash      string  `json:"hash"`
+	ShortHash string  `json:"short_hash"`
+	Branch    *string `json:"branch,omitempty"`
+	Title     string  `json:"title"`
+	Message   string  `json:"message"`
+	Author    string  `json:"author"`
+	WebURL    *string `json:"web_url,omitempty"`
+}
+
+// ImageDiffData describes the commit difference between one image pair.
+// Commits is the paginated commit list ordered from CommitA to CommitB, and
+// TotalCommits is the total count before pagination.
+type ImageDiffData struct {
+	ImgIDA       uint64                `json:"img_id_a"`
+	ImgIDB       uint64                `json:"img_id_b"`
+	ImgFullnameA string                `json:"img_fullname_a"`
+	ImgFullnameB string                `json:"img_fullname_b"`
+	GitRepo      string                `json:"git_repo"`
+	CommitA      ImageDiffCommitInfo   `json:"commit_a"`
+	CommitB      ImageDiffCommitInfo   `json:"commit_b"`
+	Commits      []ImageDiffCommitInfo `json:"commits"`
+	TotalCommits uint64                `json:"total_commits"`
+}
