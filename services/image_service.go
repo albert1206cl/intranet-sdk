@@ -120,7 +120,7 @@ func (s *imageService) CompareImages(req *models.ImageDiffReq) (*models.ImageDif
 	}
 	if response.Code != 0 {
 		utils.Error("API error: %s", response.Msg)
-		return nil, utils.NewAPIError(response.Msg, nil)
+		return nil, mapImageDiffBusinessError(response.Code, response.Msg)
 	}
 	if response.Data == nil {
 		response.Data = &models.ImageDiffData{}

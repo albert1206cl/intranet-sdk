@@ -20,6 +20,17 @@ type Client struct {
 	Image             services.ImageService
 }
 
+// 镜像差异比较（CompareImages）的业务错误 sentinel，自 services 包 re-export，
+// 调用方可直接 errors.Is(err, intranet.ErrImageDiffCommitNotFound) 等判定。
+var (
+	ErrImageDiffInvalidArgument = services.ErrImageDiffInvalidArgument
+	ErrImageDiffAmbiguous       = services.ErrImageDiffAmbiguous
+	ErrImageDiffCommitNotFound  = services.ErrImageDiffCommitNotFound
+	ErrImageDiffImageNotFound   = services.ErrImageDiffImageNotFound
+	ErrImageDiffPrecondition    = services.ErrImageDiffPrecondition
+	ErrImageDiffUpstream        = services.ErrImageDiffUpstream
+)
+
 func (c *Client) HTTPClient() *client.HTTPClient {
 	return c.client
 }

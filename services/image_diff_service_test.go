@@ -134,8 +134,12 @@ func TestCompareImagesBusinessError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "image not found") {
 		t.Fatalf("expected business error, got %v", err)
 	}
+	// 无稳定标识的 NotFound 映射为镜像不存在 sentinel（v5.5.0 错误契约）
+	if !errors.Is(err, ErrImageDiffImageNotFound) {
+		t.Fatalf("expected ErrImageDiffImageNotFound via errors.Is, got %v", err)
+	}
 	var sdkErr *utils.SDKError
-	if !errors.As(err, &sdkErr) || sdkErr.Code != utils.ErrCodeAPIError {
+	if !errors.As(err, &sdkErr) || sdkErr.Code != utils.ErrCodeNotFound || sdkErr.ServerCode != 5 {
 		t.Fatalf("unexpected error type: %T %v", err, err)
 	}
 }

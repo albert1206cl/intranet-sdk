@@ -49,6 +49,9 @@ type SDKError struct {
 	Code    ErrorCode
 	Message string
 	Err     error
+	// ServerCode 保留服务端返回的业务 code（如 gRPC code 数字），
+	// 仅供程序化读取排查，不参与 Error() 输出；未设置时为 0。
+	ServerCode int
 }
 
 // Error implements the error interface.
